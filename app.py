@@ -1,5 +1,5 @@
 """
-Cat vs Dog classifier (inference only - no training).
+Cat vs Dog classifier.
 
 Needs:  models/model1.pt  and  models/model2.pt  next to this file.
 Local : python app.py
