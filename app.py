@@ -54,7 +54,6 @@ class Model2(nn.Module):
 
 
 MODELS = {"model1": Model1, "model2": Model2}
-NAMES = {"model1": "Model 1", "model2": "Model 2"}
 
 
 def load_models():
@@ -102,8 +101,7 @@ PAGE = """<!doctype html>
   #result { text-align:center; display:none; }
   #label { font-size:40px; font-weight:800; color:var(--red); margin:4px 0; }
   #err { display:none; color:var(--red); font-weight:700; text-align:center; margin-top:14px; }
-  .bar { height:16px; border:2px solid var(--blue); border-radius:8px; overflow:hidden; margin-top:10px; }
-  .bar div { height:100%; background:var(--blue); width:0; transition:width .5s; }
+  #prob { font-size:11px; color:var(--blue); margin-top:2px; }
 </style></head>
 <body>
 <header><h1>CAT vs DOG</h1></header>
@@ -126,8 +124,7 @@ PAGE = """<!doctype html>
   <div class="card" id="result" style="margin-top:22px">
     <h2>Result</h2>
     <div id="label"></div>
-    <div id="conf"></div>
-    <div class="bar"><div id="fill"></div></div>
+    <div id="prob"></div>
   </div>
 </main>
 <script>
@@ -159,8 +156,7 @@ PAGE = """<!doctype html>
       if (!resp.ok) throw new Error(r.error || ('Server error ' + resp.status));
       document.getElementById('preview').src = r.resized;   // the 256x256 image the model saw
       document.getElementById('label').textContent = r.label;
-      document.getElementById('conf').textContent = r.confidence.toFixed(1) + '% confident  (' + r.model + ')';
-      document.getElementById('fill').style.width = r.confidence + '%';
+      document.getElementById('prob').textContent = r.prob.toFixed(6);
       document.getElementById('result').style.display = 'block';
     } catch (e) {
       err.textContent = 'Failed: ' + e.message; err.style.display = 'block';
@@ -192,7 +188,7 @@ def predict():
 
         buf = io.BytesIO()
         img.save(buf, "PNG")
-        return jsonify(label=CLASSES[i], confidence=float(probs[i]) * 100, model=NAMES[name],
+        return jsonify(label=CLASSES[i], prob=float(probs[i]),
                        resized="data:image/png;base64," + base64.b64encode(buf.getvalue()).decode())
     except Exception as e:
         app.logger.exception("predict failed")
