@@ -234,7 +234,9 @@ def predict():
                    resized="data:image/png;base64," + base64.b64encode(buf.getvalue()).decode())
 
 
+LOADED.update(load_models())
+
 if __name__ == "__main__":
-    LOADED.update(load_models())
+
     print("\nOpen http://127.0.0.1:5000 in your browser")
     app.run(port=5000)
