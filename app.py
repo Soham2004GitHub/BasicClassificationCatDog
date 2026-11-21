@@ -1,9 +1,9 @@
 """
-Cat vs Dog classifier - one file, one command:   python app.py
+Cat vs Dog classifier (inference only - no training).
 
-First run : downloads the Oxford-IIIT Pet dataset (cats/dogs), trains Model 1 and Model 2
-            from scratch (saved in ./models), then starts the web UI.
-Next runs : loads saved weights and starts instantly.
+Needs:  models/model1.pt  and  models/model2.pt  next to this file.
+Local : python app.py
+Render: gunicorn app:app --workers 1 --timeout 120 --bind 0.0.0.0:$PORT
 """
 import base64
 import io
@@ -15,15 +15,11 @@ import torch.nn as nn
 from flask import Flask, jsonify, request
 from PIL import Image
 
-SIZE = 256                      # every uploaded image is resized to 256 x 256
-EPOCHS = 10
-BATCH = 32
+SIZE = 256                       # every uploaded image is resized to 256 x 256
 CLASSES = ["Cat", "Dog"]
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(HERE, "models")
-DATA_DIR = os.path.join(HERE, "data")
-DEVICE = ("cuda" if torch.cuda.is_available()
-          else "mps" if torch.backends.mps.is_available() else "cpu")
+torch.set_num_threads(1)         # small free-tier CPUs run better with 1 thread
 
 
 # --------------------------------------------------------------------------- models
@@ -58,60 +54,7 @@ class Model2(nn.Module):
 
 
 MODELS = {"model1": Model1, "model2": Model2}
-
-
-# --------------------------------------------------------------------------- data + training
-def load_split(split):
-    """Return uint8 tensors (N,3,256,256) and labels (0=cat, 1=dog), cached on disk."""
-    cache = os.path.join(DATA_DIR, f"{split}_{SIZE}.pt")
-    if os.path.exists(cache):
-        return torch.load(cache)
-    from torchvision.datasets import OxfordIIITPet
-    ds = OxfordIIITPet(DATA_DIR, split=split, target_types="binary-category", download=True)
-    xs, ys = [], []
-    for img, y in ds:
-        img = img.convert("RGB").resize((SIZE, SIZE))
-        xs.append(torch.from_numpy(np.asarray(img).copy()).permute(2, 0, 1))
-        ys.append(y)
-    out = (torch.stack(xs), torch.tensor(ys))
-    torch.save(out, cache)
-    return out
-
-
-def train(name):
-    print(f"\n=== Training {name} on {DEVICE} ===")
-    xtr, ytr = load_split("trainval")
-    xte, yte = load_split("test")
-    model = MODELS[name]().to(DEVICE)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    loss_fn = nn.CrossEntropyLoss()
-
-    for ep in range(1, EPOCHS + 1):
-        model.train()
-        perm = torch.randperm(len(xtr))
-        total = 0.0
-        for i in range(0, len(perm), BATCH):
-            idx = perm[i:i + BATCH]
-            x = xtr[idx].float().div(255)
-            if torch.rand(1).item() < 0.5:           # simple augmentation: horizontal flip
-                x = torch.flip(x, dims=[3])
-            x, y = x.to(DEVICE), ytr[idx].to(DEVICE)
-            opt.zero_grad()
-            loss = loss_fn(model(x), y)
-            loss.backward()
-            opt.step()
-            total += loss.item() * len(idx)
-
-        model.eval()
-        correct = 0
-        with torch.no_grad():
-            for i in range(0, len(xte), 64):
-                x = xte[i:i + 64].float().div(255).to(DEVICE)
-                correct += (model(x).argmax(1).cpu() == yte[i:i + 64]).sum().item()
-        print(f"epoch {ep:2d}/{EPOCHS}  loss {total / len(xtr):.3f}  test acc {correct / len(xte):.1%}")
-
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(MODEL_DIR, f"{name}.pt"))
+NAMES = {"model1": "Model 1", "model2": "Model 2"}
 
 
 def load_models():
@@ -119,17 +62,18 @@ def load_models():
     for name, cls in MODELS.items():
         path = os.path.join(MODEL_DIR, f"{name}.pt")
         if not os.path.exists(path):
-            train(name)
-        m = cls().to(DEVICE)
-        m.load_state_dict(torch.load(path, map_location=DEVICE))
+            raise FileNotFoundError(f"{path} not found - commit models/{name}.pt to the repo")
+        m = cls()
+        m.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
         m.eval()
         loaded[name] = m
+        print(f"loaded {name} from {path}", flush=True)
     return loaded
 
 
 # --------------------------------------------------------------------------- web app
 app = Flask(__name__)
-LOADED = {}
+LOADED = load_models()           # runs on import, so it works under gunicorn too
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Cat or Dog</title>
@@ -151,12 +95,13 @@ PAGE = """<!doctype html>
   input[type=file] { display:none; }
   .drop { display:block; text-align:center; padding:26px; border:3px dashed var(--red); border-radius:10px;
           color:var(--red); font-weight:700; cursor:pointer; }
-  #preview { display:none; width:256px; height:256px; margin:16px auto 0; border:3px solid var(--blue); border-radius:8px; }
+  #preview { display:none; width:256px; height:256px; max-width:100%; margin:16px auto 0; border:3px solid var(--blue); border-radius:8px; }
   #go { width:100%; padding:15px; font-size:17px; font-weight:700; border:none; border-radius:10px;
         background:var(--red); color:var(--white); cursor:pointer; }
   #go:disabled { opacity:.45; cursor:not-allowed; }
   #result { text-align:center; display:none; }
   #label { font-size:40px; font-weight:800; color:var(--red); margin:4px 0; }
+  #err { display:none; color:var(--red); font-weight:700; text-align:center; margin-top:14px; }
   .bar { height:16px; border:2px solid var(--blue); border-radius:8px; overflow:hidden; margin-top:10px; }
   .bar div { height:100%; background:var(--blue); width:0; transition:width .5s; }
 </style></head>
@@ -177,6 +122,7 @@ PAGE = """<!doctype html>
     <img id="preview" alt="preview (256 x 256)">
   </div>
   <button id="go" disabled onclick="classify()">Classify</button>
+  <div id="err"></div>
   <div class="card" id="result" style="margin-top:22px">
     <h2>Result</h2>
     <div id="label"></div>
@@ -187,6 +133,7 @@ PAGE = """<!doctype html>
 <script>
   let model = 'model1';
   const file = document.getElementById('file');
+  const err = document.getElementById('err');
   function pick(m) {
     model = m;
     document.getElementById('m1').classList.toggle('active', m === 'model1');
@@ -195,20 +142,29 @@ PAGE = """<!doctype html>
   file.onchange = () => {
     document.getElementById('go').disabled = !file.files.length;
     document.getElementById('result').style.display = 'none';
+    err.style.display = 'none';
     if (file.files.length) {
       const p = document.getElementById('preview');
       p.src = URL.createObjectURL(file.files[0]); p.style.display = 'block';
     }
   };
   async function classify() {
-    const go = document.getElementById('go'); go.disabled = true; go.textContent = 'Classifying...';
-    const fd = new FormData(); fd.append('image', file.files[0]); fd.append('model', model);
-    const r = await (await fetch('/predict', {method:'POST', body:fd})).json();
-    document.getElementById('preview').src = r.resized;      // show the 256x256 version used by the model
-    document.getElementById('label').textContent = r.label;
-    document.getElementById('conf').textContent = r.confidence.toFixed(1) + '% confident  (' + r.model + ')';
-    document.getElementById('fill').style.width = r.confidence + '%';
-    document.getElementById('result').style.display = 'block';
+    const go = document.getElementById('go');
+    go.disabled = true; go.textContent = 'Classifying...'; err.style.display = 'none';
+    try {
+      const fd = new FormData();
+      fd.append('image', file.files[0]); fd.append('model', model);
+      const resp = await fetch('/predict', {method:'POST', body:fd});
+      const r = await resp.json().catch(() => ({error: 'Server error ' + resp.status}));
+      if (!resp.ok) throw new Error(r.error || ('Server error ' + resp.status));
+      document.getElementById('preview').src = r.resized;   // the 256x256 image the model saw
+      document.getElementById('label').textContent = r.label;
+      document.getElementById('conf').textContent = r.confidence.toFixed(1) + '% confident  (' + r.model + ')';
+      document.getElementById('fill').style.width = r.confidence + '%';
+      document.getElementById('result').style.display = 'block';
+    } catch (e) {
+      err.textContent = 'Failed: ' + e.message; err.style.display = 'block';
+    }
     go.disabled = false; go.textContent = 'Classify';
   }
 </script></body></html>"""
@@ -221,22 +177,29 @@ def index():
 
 @app.post("/predict")
 def predict():
-    name = request.form.get("model", "model1")
-    img = Image.open(request.files["image"].stream).convert("RGB").resize((SIZE, SIZE))
-    x = torch.from_numpy(np.asarray(img).copy()).permute(2, 0, 1).float().div(255).unsqueeze(0)
-    with torch.no_grad():
-        probs = torch.softmax(LOADED[name](x.to(DEVICE)), dim=1)[0].cpu()
-    i = int(probs.argmax())
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    return jsonify(label=CLASSES[i], confidence=float(probs[i]) * 100,
-                   model="Model 1" if name == "model1" else "Model 2",
-                   resized="data:image/png;base64," + base64.b64encode(buf.getvalue()).decode())
+    try:
+        name = request.form.get("model", "model1")
+        if name not in LOADED:
+            return jsonify(error="Unknown model"), 400
+        if "image" not in request.files:
+            return jsonify(error="No image uploaded"), 400
 
+        img = Image.open(request.files["image"].stream).convert("RGB").resize((SIZE, SIZE))
+        x = torch.from_numpy(np.asarray(img).copy()).permute(2, 0, 1).float().div(255).unsqueeze(0)
+        with torch.no_grad():
+            probs = torch.softmax(LOADED[name](x), dim=1)[0]
+        i = int(probs.argmax())
 
-LOADED.update(load_models())
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        return jsonify(label=CLASSES[i], confidence=float(probs[i]) * 100, model=NAMES[name],
+                       resized="data:image/png;base64," + base64.b64encode(buf.getvalue()).decode())
+    except Exception as e:
+        app.logger.exception("predict failed")
+        return jsonify(error=f"Could not classify image: {e}"), 500
+
 
 if __name__ == "__main__":
-
-    print("\nOpen http://127.0.0.1:5000 in your browser")
-    app.run(port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    print(f"\nOpen http://127.0.0.1:{port} in your browser")
+    app.run(host="0.0.0.0", port=port)
